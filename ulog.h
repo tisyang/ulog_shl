@@ -10,6 +10,10 @@
 #ifndef ULOG_MACRO_LOG_H
 #define ULOG_MACRO_LOG_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdbool.h>
 
 enum uLogLevel {
@@ -26,19 +30,14 @@ enum uLogLevel {
 # define ULOG_FILELINE  __LINE__
 # define ULOG_FUNCNAME  __func__
 
-// init ulog by log file path
+// log output to new file (not affect stdou/stderr)
 // return 0 OK, otherwise error
-// filepath: NULL => not to file, other: file path
-int  ulog_init(const char *filepath);
-// deinit
-void ulog_fini();
+// filepath: NULL => close output to file
+int  ulog_tofile(const char *newfile);
 // get ulog current log file bytes
 // return 0 OK, otherwise error
 // *size storege filesize
-int ulog_size(long *size);
-// open new file to log
-// return 0 OK, otherwise error
-int ulog_reopen(const char *newfile);
+int  ulog_size(long *size);
 // flush file
 void ulog_flush();
 // core output function
@@ -46,8 +45,6 @@ void ulog_output(int level, const char *file, int line, const char *func, const 
 // core printf function
 void ulog_printf(int level, const char *file, int line, const char *func, const char *fmt, ...)
     __attribute__((format(printf, 5, 6)));
-// check if level need log
-bool ulog_should_log(int level);
 
 
 // set output level
@@ -69,18 +66,19 @@ int  ulog_set_timefmt(const char *timefmt);
 // return 0 OK, otherwise error
 int  ulog_set_srcfmt(const char *srcfmt);
 
-#define ULOG_IF_(level, fmt, ...) do { \
-    if (ulog_should_log(level)) { \
-        ulog_printf(level, ULOG_FILENAME, ULOG_FILELINE, ULOG_FUNCNAME, fmt, ##__VA_ARGS__); \
-    } \
-} while(0)
+#define ULOG_LEVEL_(level, fmt, ...) \
+        ulog_printf(level, ULOG_FILENAME, ULOG_FILELINE, ULOG_FUNCNAME, fmt, ##__VA_ARGS__)
 
 // debug macro
-#define ulog_debug(fmt, ...)   ULOG_IF_(ULOG_LL_DEBUG,   fmt, ##__VA_ARGS__)
-#define ulog_info(fmt, ...)    ULOG_IF_(ULOG_LL_INFO,    fmt, ##__VA_ARGS__)
-#define ulog_notice(fmt, ...)  ULOG_IF_(ULOG_LL_NOTICE,  fmt, ##__VA_ARGS__)
-#define ulog_warn(fmt, ...)    ULOG_IF_(ULOG_LL_WARNING, fmt, ##__VA_ARGS__)
-#define ulog_error(fmt, ...)   ULOG_IF_(ULOG_LL_ERROR,   fmt, ##__VA_ARGS__)
+#define ulog_debug(fmt, ...)   ULOG_LEVEL_(ULOG_LL_DEBUG,   fmt, ##__VA_ARGS__)
+#define ulog_info(fmt, ...)    ULOG_LEVEL_(ULOG_LL_INFO,    fmt, ##__VA_ARGS__)
+#define ulog_notice(fmt, ...)  ULOG_LEVEL_(ULOG_LL_NOTICE,  fmt, ##__VA_ARGS__)
+#define ulog_warn(fmt, ...)    ULOG_LEVEL_(ULOG_LL_WARNING, fmt, ##__VA_ARGS__)
+#define ulog_error(fmt, ...)   ULOG_LEVEL_(ULOG_LL_ERROR,   fmt, ##__VA_ARGS__)
+
+#ifdef __cplusplus
+}
+#endif
 
 # ifdef ULOG_IMPLEMENTATION
 #  ifndef ULOG_LINEBUF_MAXSZ
@@ -147,7 +145,6 @@ enum uLogSrcFmt {
 
 
 struct ulog_ctx {
-    bool    if_inited;      // if init
     int     tty_bits;       // tty check:
                             // bit 0: if checked
                             // bit 1: stdout tty
@@ -167,10 +164,9 @@ struct ulog_ctx {
     (LEVEL_TO_BITS(ULOG_LL_DEBUG) | TIMEFMT_TO_BITS(TIMEFMT_SHORT) | SRCFMT_TO_BITS(SRCFMT_SHORT))
 
 static struct ulog_ctx g_ulog_ctx = {
-    .if_inited = false,
     .tty_bits = 0,
     .fp = NULL,
-    .flags = ATOMIC_VAR_INIT(ULOG_DEFAULT_FLAGS),
+    .flags = ULOG_DEFAULT_FLAGS,
     .write_lock = ATOMIC_FLAG_INIT,
     .last_sec = 0,
 };
@@ -182,6 +178,8 @@ static inline void ulog_lock(struct ulog_ctx *ctx)
         __asm__ __volatile__("pause");
 #elif defined(__arm__) || defined(__aarch64__)
         __asm__ __volatile__("yield");
+#elif defined(__riscv__)
+        __asm__ __volatile__ ("pause" ::: "memory");
 #else
 #endif
     }
@@ -259,57 +257,6 @@ int  ulog_set_srcfmt(const char *srcfmt)
     }
 }
 
-bool ulog_should_log(int level)
-{
-    return level >= (0xF & atomic_load_explicit(&g_ulog_ctx.flags, memory_order_relaxed));
-}
-
-int  ulog_init(const char *filepath)
-{
-    int ret = 0;
-    ulog_lock(&g_ulog_ctx);
-    g_ulog_ctx.tty_bits = 1;
-    g_ulog_ctx.tty_bits |= (!!isatty(fileno(stdout))) << 1;
-    g_ulog_ctx.tty_bits |= (!!isatty(fileno(stderr))) << 2;
-
-    if (!g_ulog_ctx.if_inited) {
-        if (filepath) {
-            g_ulog_ctx.fp = fopen(filepath, "ae");
-            if (!g_ulog_ctx.fp) {
-                ret = errno;
-            } else {
-                ret = 0;
-                g_ulog_ctx.if_inited = true;
-            }
-        } else {
-            ret = 0;
-        }
-    } else {
-        ret = EBUSY;
-    }
-    ulog_unlock(&g_ulog_ctx);
-    if (ret) {
-        ulog_error("ulog init filepath='%s' failed, %s", filepath, strerror(ret));
-    }
-    return ret;
-}
-
-void ulog_fini(void)
-{
-    ulog_lock(&g_ulog_ctx);
-    if (g_ulog_ctx.if_inited) {
-        if (g_ulog_ctx.fp) {
-            fflush(g_ulog_ctx.fp);
-            fclose(g_ulog_ctx.fp);
-            g_ulog_ctx.fp = NULL;
-        }
-        g_ulog_ctx.last_sec = 0;
-        g_ulog_ctx.if_inited = false;
-        atomic_store(&g_ulog_ctx.flags, ULOG_DEFAULT_FLAGS);
-    }
-    ulog_unlock(&g_ulog_ctx);
-}
-
 int ulog_size(long *size)
 {
     long fsize = 0;
@@ -328,36 +275,33 @@ int ulog_size(long *size)
     return ret;
 }
 
-int ulog_reopen(const char *newfile)
+int ulog_tofile(const char *newfile)
 {
-    if (!newfile || strlen(newfile) == 0) {
-        return EINVAL;
-    }
-
     int ret = 0;
     ulog_lock(&g_ulog_ctx);
 
-    do {
-        if (!g_ulog_ctx.if_inited) {
-            ret = ENOTSUP;
-            break;
-        }
-        if (g_ulog_ctx.fp && g_ulog_ctx.fp != stdout && g_ulog_ctx.fp != stderr) {
-            fclose(g_ulog_ctx.fp);
-            g_ulog_ctx.fp = NULL;
-        }
+    if (g_ulog_ctx.tty_bits == 0) {
+        g_ulog_ctx.tty_bits = 1;
+        g_ulog_ctx.tty_bits |= (!!isatty(fileno(stdout))) << 1;
+        g_ulog_ctx.tty_bits |= (!!isatty(fileno(stderr))) << 2;
+    }
 
+    if (g_ulog_ctx.fp) {
+        fflush(g_ulog_ctx.fp);
+        fclose(g_ulog_ctx.fp);
+        g_ulog_ctx.fp = NULL;
+    }
+
+    if (newfile) {
         g_ulog_ctx.fp = fopen(newfile, "ae");
-        if (g_ulog_ctx.fp) {
-            ret = 0;
-        } else {
+        if (!g_ulog_ctx.fp) {
             ret = errno;
         }
-    } while (0);
+    }
 
     ulog_unlock(&g_ulog_ctx);
     if (ret) {
-        ulog_error("ulog_reopen with '%s' failed, %s", newfile, strerror(ret));
+        ulog_error("ulog_tofile newfile='%s' failed, %s", newfile, strerror(ret));
     }
     return ret;
 }
@@ -462,6 +406,9 @@ void ulog_output(int level, const char *file, int line, const char *func, const 
 // core printf function
 void ulog_printf(int level, const char *file, int line, const char *func, const char *fmt, ...)
 {
+    unsigned flags = atomic_load_explicit(&g_ulog_ctx.flags, memory_order_relaxed);
+    if (level < LEVEL_FROM_BITS(flags)) return;
+
     char buff[ULOG_LINEBUF_MAXSZ];
     va_list arglist;
     va_start(arglist, fmt);
