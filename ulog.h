@@ -333,15 +333,21 @@ void ulog_output(int level, const char *file, int line, const char *func, const 
 
     int srcfmt = SRCFMT_FROM_BITS(flags);
     char srcbuf[256] = {0};
+    file = file ?: "<\?\?\?>";
+    func = func ?: "<\?\?\?>";
+    char lbuf[16] = "?";
+    if (line >= 0) {
+        snprintf(lbuf, sizeof(lbuf), "%d", line);
+    }
     switch (srcfmt) {
     case SRCFMT_FULL:
-        snprintf(srcbuf, sizeof(srcbuf), "%s:%d [%d]%s", file ?: "<unknown>", line, ulog_get_tid(), func ?:"<unknown>");
+        snprintf(srcbuf, sizeof(srcbuf), "%s:%s [%d]%s", file, lbuf, ulog_get_tid(), func);
         break;
     case SRCFMT_LONG:
-        snprintf(srcbuf, sizeof(srcbuf), "%s:%d %s", file ?: "<unknown>", line, func ?:"<unknown>");
+        snprintf(srcbuf, sizeof(srcbuf), "%s:%s %s", file, lbuf, func);
         break;
     case SRCFMT_SHORT:
-        snprintf(srcbuf, sizeof(srcbuf), "%s:%d", file ?: "<unknown>", line);
+        snprintf(srcbuf, sizeof(srcbuf), "%s:%s", file, lbuf);
         break;
     }
 
